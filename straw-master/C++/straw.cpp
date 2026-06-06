@@ -265,87 +265,6 @@ void readThroughNormalizationFactors(istream &fin, int32_t version, bool store, 
     }
 }
 
-bool findNormalizationVectorInFooter(istream &fin, int32_t version, int32_t chrIdx,
-                                     const string &norm, const string &unit, int32_t resolution,
-                                     indexEntry &normEntry) {
-    if (version > 8) {
-        readInt64FromFile(fin);
-    } else {
-        readInt32FromFile(fin);
-    }
-
-    int32_t nEntries = readInt32FromFile(fin);
-    for (int i = 0; i < nEntries; i++) {
-        string keyStr;
-        getline(fin, keyStr, '\0');
-        readInt64FromFile(fin);
-        readInt32FromFile(fin);
-    }
-
-    vector<double> ignoredExpectedValues;
-
-    int32_t nExpectedValues = readInt32FromFile(fin);
-    for (int i = 0; i < nExpectedValues; i++) {
-        string unit0;
-        getline(fin, unit0, '\0');
-        readInt32FromFile(fin);
-
-        int64_t nValues;
-        if (version > 8) {
-            nValues = readInt64FromFile(fin);
-        } else {
-            nValues = static_cast<int64_t>(readInt32FromFile(fin));
-        }
-
-        readThroughExpectedVector(version, fin, ignoredExpectedValues, nValues, false, resolution);
-        readThroughNormalizationFactors(fin, version, false, ignoredExpectedValues, chrIdx);
-    }
-
-    nExpectedValues = readInt32FromFile(fin);
-    for (int i = 0; i < nExpectedValues; i++) {
-        string nType, unit0;
-        getline(fin, nType, '\0');
-        getline(fin, unit0, '\0');
-        readInt32FromFile(fin);
-
-        int64_t nValues;
-        if (version > 8) {
-            nValues = readInt64FromFile(fin);
-        } else {
-            nValues = static_cast<int64_t>(readInt32FromFile(fin));
-        }
-
-        readThroughExpectedVector(version, fin, ignoredExpectedValues, nValues, false, resolution);
-        readThroughNormalizationFactors(fin, version, false, ignoredExpectedValues, chrIdx);
-    }
-
-    nEntries = readInt32FromFile(fin);
-    for (int i = 0; i < nEntries; i++) {
-        string normtype;
-        getline(fin, normtype, '\0');
-        int32_t currChrIdx = readInt32FromFile(fin);
-        string unit1;
-        getline(fin, unit1, '\0');
-        int32_t resolution1 = readInt32FromFile(fin);
-        int64_t filePosition = readInt64FromFile(fin);
-
-        int64_t sizeInBytes;
-        if (version > 8) {
-            sizeInBytes = readInt64FromFile(fin);
-        } else {
-            sizeInBytes = static_cast<int64_t>(readInt32FromFile(fin));
-        }
-
-        if (currChrIdx == chrIdx && normtype == norm && unit1 == unit && resolution1 == resolution) {
-            normEntry.position = filePosition;
-            normEntry.size = sizeInBytes;
-            return true;
-        }
-    }
-
-    return false;
-}
-
 bool readFooter(istream &fin, int64_t master, int32_t version, int32_t c1, int32_t c2, const string &matrixType,
                 const string &norm, const string &unit, int32_t resolution, int64_t &myFilePos,
                 indexEntry &c1NormEntry, indexEntry &c2NormEntry, vector<double> &expectedValues) {
@@ -1343,33 +1262,6 @@ vector<chromosome> getChromosomesForFile(const string &fileName) {
 vector<int32_t> getResolutionsForFile(const string &fileName) {
     HiCFile hiCFile(fileName);
     return hiCFile.getResolutions();
-}
-
-vector<double> getNormalizationVectorForChromosome(const string &fileName, const string &matrixType,
-                                                   const string &norm, const string &chrom,
-                                                   const string &unit, int32_t binsize) {
-    (void)matrixType;
-    HiCFile hiCFile(fileName);
-    if (hiCFile.chromosomeMap.count(chrom) == 0) {
-        cerr << "chromosome " << chrom << " not found in the file." << endl;
-        vector<double> empty;
-        return empty;
-    }
-
-    const int32_t chromIndex = hiCFile.chromosomeMap[chrom].index;
-    HiCFileStream stream(fileName);
-    stream.fin.seekg(hiCFile.master, ios::beg);
-
-    indexEntry normEntry{};
-    if (!findNormalizationVectorInFooter(stream.fin, hiCFile.version, chromIndex, norm, unit,
-                                         binsize, normEntry)) {
-        stream.close();
-        vector<double> empty;
-        return empty;
-    }
-    stream.close();
-
-    return MatrixZoomData::readNormalizationVectorFromFooter(normEntry, hiCFile.version, fileName);
 }
 
 int64_t getNumRecordsForFile(const string &fileName, int32_t binsize, bool interOnly) {

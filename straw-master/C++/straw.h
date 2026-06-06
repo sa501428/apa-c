@@ -99,13 +99,6 @@ std::vector<chromosome> getChromosomesForFile(const std::string& fileName);
 
 std::vector<int32_t> getResolutionsForFile(const std::string& fileName);
 
-std::vector<double> getNormalizationVectorForChromosome(const std::string& fileName,
-                                                      const std::string& matrixType,
-                                                      const std::string& norm,
-                                                      const std::string& chrom,
-                                                      const std::string& unit,
-                                                      int32_t binsize);
-
 int64_t getNumRecordsForFile(const std::string& filename, int32_t binsize, bool interOnly);
 
 int64_t getNumRecordsForChromosomes(const std::string& filename, int32_t binsize, bool interOnly);

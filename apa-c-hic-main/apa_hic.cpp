@@ -76,13 +76,6 @@ struct SparseMaskedContactMatrix {
     }
 };
 
-std::string toUpper(std::string value) {
-    for (char& ch : value) {
-        ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
-    }
-    return value;
-}
-
 std::string toLower(std::string value) {
     for (char& ch : value) {
         ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
@@ -120,15 +113,6 @@ int parseIntOption(const std::string& value, const std::string& option) {
         return std::stoi(value);
     } catch (const std::exception&) {
         throw std::runtime_error("Invalid integer for " + option + ": " + value);
-    }
-}
-
-void validateNorm(const std::string& norm) {
-    static const std::set<std::string> valid = {"NONE", "VC", "VC_SQRT", "KR"};
-    if (valid.count(norm) == 0) {
-        throw std::runtime_error(
-            "Unsupported normalization '" + norm +
-            "'. Supported values are NONE, VC, VC_SQRT, KR, or ag-norm via --ag-norm.");
     }
 }
 
@@ -255,6 +239,10 @@ void addLocalNormSums(std::vector<double>& sums, const std::vector<double>& norm
     }
 }
 
+size_t getNumBinsForChromosome(const chromosome& chrom, int resolution) {
+    return static_cast<size_t>(chrom.length / resolution) + 1;
+}
+
 double averageOf(const std::vector<double>& values) {
     if (values.empty()) {
         return 0.0;
@@ -354,7 +342,9 @@ void saveMatrix(const std::string& file_name, const std::vector<float>& matrix, 
 SparseMaskedContactMatrix buildSparseMaskedMatrix(const std::vector<contactRecord>& records,
                                                   const std::unordered_set<int32_t>& relevant_bins,
                                                   int resolution, bool is_intra,
-                                                  int min_dist_with_buffer, int max_dist_with_buffer) {
+                                                  int min_dist_with_buffer, int max_dist_with_buffer,
+                                                  std::vector<double>& coverage1,
+                                                  std::vector<double>& coverage2) {
     SparseMaskedContactMatrix sparse;
     sparse.data.reserve(relevant_bins.size());
 
@@ -365,6 +355,13 @@ SparseMaskedContactMatrix buildSparseMaskedMatrix(const std::vector<contactRecor
 
         const int32_t bin_x = record.binX / resolution;
         const int32_t bin_y = record.binY / resolution;
+
+        if (bin_x >= 0 && static_cast<size_t>(bin_x) < coverage1.size()) {
+            coverage1[static_cast<size_t>(bin_x)] += record.counts;
+        }
+        if (bin_y >= 0 && static_cast<size_t>(bin_y) < coverage2.size()) {
+            coverage2[static_cast<size_t>(bin_y)] += record.counts;
+        }
 
         if (is_intra) {
             const int32_t dist = std::abs(bin_y - bin_x);
@@ -384,6 +381,7 @@ SparseMaskedContactMatrix buildSparseMaskedMatrix(const std::vector<contactRecor
 }
 
 void populateOutputsForPair(const PairKey& pair_key, const Options& options,
+                            const std::map<std::string, chromosome>& chromosome_map,
                             std::vector<OutputState>& outputs) {
     const bool is_intra = pair_key.first == pair_key.second;
     const int matrix_width = options.window * 2 + 1;
@@ -423,9 +421,8 @@ void populateOutputsForPair(const PairKey& pair_key, const Options& options,
     std::cout << "Processing " << pair_key.first << " / " << pair_key.second
               << " across " << total_loops << " loops" << std::endl;
 
-    const std::string counts_norm = options.use_aggregate_normalization ? "NONE" : options.norm;
     std::vector<contactRecord> records =
-        straw("observed", counts_norm, options.hic_file, pair_key.first, pair_key.second, "BP",
+        straw("observed", "NONE", options.hic_file, pair_key.first, pair_key.second, "BP",
               options.resolution);
 
     int min_dist_with_buffer = 0;
@@ -435,30 +432,15 @@ void populateOutputsForPair(const PairKey& pair_key, const Options& options,
         max_dist_with_buffer = max_dist + (4 * options.window);
     }
 
+    std::vector<double> norm_vector1(
+        getNumBinsForChromosome(chromosome_map.at(pair_key.first), options.resolution), 0.0);
+    std::vector<double> norm_vector2(
+        getNumBinsForChromosome(chromosome_map.at(pair_key.second), options.resolution), 0.0);
+
     const SparseMaskedContactMatrix sparse =
         buildSparseMaskedMatrix(records, relevant_bins, options.resolution, is_intra,
-                                min_dist_with_buffer, max_dist_with_buffer);
-
-    std::vector<double> norm_vector1;
-    std::vector<double> norm_vector2;
-    if (options.use_aggregate_normalization) {
-        norm_vector1 = getNormalizationVectorForChromosome(options.hic_file, "observed", "VC",
-                                                           pair_key.first, "BP", options.resolution);
-        if (norm_vector1.empty()) {
-            throw std::runtime_error("Unable to load VC normalization vector for " + pair_key.first);
-        }
-
-        if (is_intra) {
-            norm_vector2 = norm_vector1;
-        } else {
-            norm_vector2 = getNormalizationVectorForChromosome(options.hic_file, "observed", "VC",
-                                                               pair_key.second, "BP",
-                                                               options.resolution);
-            if (norm_vector2.empty()) {
-                throw std::runtime_error("Unable to load VC normalization vector for " + pair_key.second);
-            }
-        }
-    }
+                                min_dist_with_buffer, max_dist_with_buffer,
+                                norm_vector1, norm_vector2);
 
     for (auto& output : outputs) {
         auto it = output.loops_by_pair.find(pair_key);
@@ -470,11 +452,8 @@ void populateOutputsForPair(const PairKey& pair_key, const Options& options,
             const int32_t start1 = loop.center_bin1 - options.window;
             const int32_t start2 = loop.center_bin2 - options.window;
             sparse.addLocalBoundedRegion(output.matrix, matrix_width, start1, start2);
-
-            if (options.use_aggregate_normalization) {
-                addLocalNormSums(output.row_sums, norm_vector1, start1);
-                addLocalNormSums(output.col_sums, norm_vector2, start2);
-            }
+            addLocalNormSums(output.row_sums, norm_vector1, start1);
+            addLocalNormSums(output.col_sums, norm_vector2, start2);
         }
     }
 }
@@ -482,13 +461,14 @@ void populateOutputsForPair(const PairKey& pair_key, const Options& options,
 }  // namespace
 
 void printUsage(std::ostream& out) {
-    out << "Usage: apa_hic [--ag-norm] [-k NORM] [--window W] [--min-dist BINS] [--max-dist BINS]\n"
+    out << "Usage: apa_hic [--window W] [--min-dist BINS] [--max-dist BINS]\n"
         << "               [--include-inter] [-r RESOLUTION]\n"
         << "               <input.hic> <loops1.bedpe> <output1.{npy,txt}> [<loops2.bedpe> <output2...> ...]\n"
         << "\n"
         << "Notes:\n"
         << "  --min-dist/--max-dist are interpreted in bins, matching APA3-style behavior.\n"
-        << "  --ag-norm uses raw observed counts plus VC vectors from the .hic file.\n"
+        << "  Aggregate normalization is always used.\n"
+        << "  Coverage vectors are recomputed locally from raw observed counts.\n"
         << "  Loop files are BEDPE-like; only the first 6 columns are required.\n";
 }
 
@@ -499,7 +479,7 @@ Options parseOptions(int argc, char* argv[]) {
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--ag-norm") {
-            options.use_aggregate_normalization = true;
+            continue;
         } else if (arg == "--include-inter") {
             options.include_inter = true;
         } else if (arg == "-r" || arg == "--res") {
@@ -511,7 +491,11 @@ Options parseOptions(int argc, char* argv[]) {
         } else if (arg == "--max-dist") {
             options.max_dist_bins = parseIntOption(nextValue(argc, argv, i, arg), arg);
         } else if (arg == "-k" || arg == "--norm") {
-            options.norm = nextValue(argc, argv, i, arg);
+            const std::string norm_arg = nextValue(argc, argv, i, arg);
+            if (!isAggNormLabel(norm_arg)) {
+                throw std::runtime_error(
+                    "Only aggregate normalization is supported; omit --norm or use --ag-norm.");
+            }
         } else if (arg == "-h" || arg == "--help") {
             printUsage(std::cout);
             std::exit(0);
@@ -520,14 +504,6 @@ Options parseOptions(int argc, char* argv[]) {
         } else {
             positional.push_back(arg);
         }
-    }
-
-    if (isAggNormLabel(options.norm)) {
-        options.use_aggregate_normalization = true;
-        options.norm = "NONE";
-    } else {
-        options.norm = toUpper(options.norm);
-        validateNorm(options.norm);
     }
 
     if (options.resolution <= 0) {
@@ -598,14 +574,11 @@ int runAPA(const Options& options) {
     }
 
     for (const auto& pair_key : all_pairs) {
-        populateOutputsForPair(pair_key, options, outputs);
+        populateOutputsForPair(pair_key, options, chromosome_map, outputs);
     }
 
     for (auto& output : outputs) {
-        if (options.use_aggregate_normalization) {
-            applyAggregateNormalization(output, matrix_width);
-        }
-
+        applyAggregateNormalization(output, matrix_width);
         std::cout << "Writing " << output.spec.output_file << std::endl;
         saveMatrix(output.spec.output_file, output.matrix, matrix_width);
     }

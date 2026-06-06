@@ -11,14 +11,12 @@ struct OutputSpec {
 };
 
 struct Options {
-    bool use_aggregate_normalization = false;
     bool include_inter = false;
     int resolution = 5000;
     int window = 10;
     int min_dist_bins = -1;
     int max_dist_bins = -1;
     std::string hic_file;
-    std::string norm = "KR";
     std::vector<OutputSpec> outputs;
 };
 
