@@ -7,7 +7,7 @@ The tool provides functionality to read .hic files and extract contact matrices 
 
 ## Installation:
 1. Requires CMake 3.13 or higher
-2. Requires libcurl and zlib development libraries
+2. Requires zlib and zstd development libraries
 3. Clone the repository
 4. Create a build directory: `mkdir build`
 5. Enter build directory: `cd build`
@@ -15,7 +15,7 @@ The tool provides functionality to read .hic files and extract contact matrices 
 7. Build: `make`
 
 ## Usage:
-The main executable 'straw' supports two modes:
+The main executable 'straw' supports two modes for local `.hic` files:
 1. Standard mode:
 `straw [observed/oe/expected] <NONE/VC/VC_SQRT/KR> <hicFile> <chr1>[:x1:x2] <chr2>[:y1:y2] <BP/FRAG/MATRIX> <binsize>`
 2. Dump mode (creates slice file):

@@ -176,13 +176,17 @@ void canonicalizeLoop(LoopRecord& loop, const std::map<std::string, chromosome>&
                                  loop.chrom1 + " / " + loop.chrom2);
     }
 
+    const int64_t mid1 = (loop.start1 + loop.end1) / 2;
+    const int64_t mid2 = (loop.start2 + loop.end2) / 2;
+
     if (chr1_it->second.index > chr2_it->second.index) {
         std::swap(loop.chrom1, loop.chrom2);
         std::swap(loop.start1, loop.start2);
         std::swap(loop.end1, loop.end2);
-    } else if (chr1_it->second.index == chr2_it->second.index && loop.start1 > loop.start2) {
-        // For same-chromosome loops ensure lower coordinate is anchor 1, matching
-        // the upper-triangle storage in the .hic file (binX <= binY).
+    } else if (chr1_it->second.index == chr2_it->second.index &&
+               (mid1 > mid2 || (mid1 == mid2 && loop.start1 > loop.start2))) {
+        // For same-chromosome loops ensure the first anchor bins at or before the second,
+        // matching the upper-triangle storage in the .hic file.
         std::swap(loop.start1, loop.start2);
         std::swap(loop.end1, loop.end2);
     }

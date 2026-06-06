@@ -29,7 +29,6 @@
 #include <vector>
 #include <map>
 #include <string>
-#include <curl/curl.h>
 
 // Forward declarations
 class HiCFile;
@@ -84,12 +83,6 @@ struct memstream : virtual membuf, std::istream {
             setg(eback(), eback() + off, egptr());
         return gptr() - eback();
     }
-};
-
-// for holding data from URL call
-struct MemoryStruct {
-    char *memory;
-    size_t size;
 };
 
 // Function declarations

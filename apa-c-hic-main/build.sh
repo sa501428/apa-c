@@ -10,5 +10,5 @@ g++ -std=c++17 -O3 -Wall -Wextra \
   -I../straw-master/C++ \
   -o apa_hic \
   main.cpp apa_hic.cpp ../straw-master/C++/straw.cpp \
-  -lcurl -lz -pthread \
+  -lz -pthread \
   ${ZSTD_LIBS}
