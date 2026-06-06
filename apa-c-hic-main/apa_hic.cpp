@@ -180,6 +180,11 @@ void canonicalizeLoop(LoopRecord& loop, const std::map<std::string, chromosome>&
         std::swap(loop.chrom1, loop.chrom2);
         std::swap(loop.start1, loop.start2);
         std::swap(loop.end1, loop.end2);
+    } else if (chr1_it->second.index == chr2_it->second.index && loop.start1 > loop.start2) {
+        // For same-chromosome loops ensure lower coordinate is anchor 1, matching
+        // the upper-triangle storage in the .hic file (binX <= binY).
+        std::swap(loop.start1, loop.start2);
+        std::swap(loop.end1, loop.end2);
     }
 }
 
@@ -318,10 +323,8 @@ void saveAsNpy(const std::string& file_name, const std::vector<float>& matrix, i
                          "), }";
 
     const size_t base_size = magic.size() + 2 + 2;
-    size_t padding = 16 - ((base_size + header.size() + 1) % 16);
-    if (padding == 16) {
-        padding = 0;
-    }
+    const size_t remainder = (base_size + header.size() + 1) % 64;
+    const size_t padding = (remainder == 0) ? 0 : 64 - remainder;
     header.append(padding, ' ');
     header.push_back('\n');
 

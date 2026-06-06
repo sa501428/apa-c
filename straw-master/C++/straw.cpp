@@ -202,10 +202,9 @@ public:
 };
 
 char *readCompressedBytesFromFile(const string &fileName, indexEntry idx) {
-    HiCFileStream *stream = new HiCFileStream(fileName);
-    char *compressedBytes = stream->readCompressedBytes(idx);
-    stream->close();
-    delete stream;
+    HiCFileStream stream(fileName);
+    char *compressedBytes = stream.readCompressedBytes(idx);
+    stream.close();
     return compressedBytes;
 }
 
@@ -310,7 +309,7 @@ int64_t readThroughExpectedVectorURL(CURL *curl, int64_t currentPointer, int32_t
         } else {
             populateVectorWithDoubles(fin, expectedValues, nValues);
         }
-        delete buffer;
+        free(buffer);
     }
 
     if (version > 8) {
@@ -362,7 +361,7 @@ int64_t readThroughNormalizationFactorsURL(CURL *curl, int64_t currentPointer, i
                 }
             }
         }
-        delete buffer;
+        free(buffer);
     }
 
     if (version > 8) {
@@ -433,7 +432,7 @@ bool readFooterURL(CURL *curl, int64_t master, int32_t version, int32_t c1, int3
     int32_t nEntries = readInt32FromFile(newFin);
 
     currentPointer += 4;
-    delete buffer;
+    free(buffer);
 
     int32_t bufferSize0 = nEntries * 50;
     buffer = getData(curl, currentPointer, bufferSize0);
@@ -456,7 +455,7 @@ bool readFooterURL(CURL *curl, int64_t master, int32_t version, int32_t c1, int3
             found = true;
         }
     }
-    delete buffer;
+    free(buffer);
     if (!found) {
         cerr << "Remote file doesn't have the given chr_chr map " << key << endl;
         return false;
@@ -475,7 +474,7 @@ bool readFooterURL(CURL *curl, int64_t master, int32_t version, int32_t c1, int3
     int32_t nExpectedValues = readInt32FromFile(newFin3);
 
     currentPointer += 4;
-    delete buffer;
+    free(buffer);
     for (int i = 0; i < nExpectedValues; i++) {
 
         buffer = getData(curl, currentPointer, 1000);
@@ -500,7 +499,7 @@ bool readFooterURL(CURL *curl, int64_t master, int32_t version, int32_t c1, int3
             currentPointer += 4;
         }
 
-        delete buffer;
+        free(buffer);
 
         bool store = c1 == c2 && (matrixType == "oe" || matrixType == "expected") && norm == "NONE" && unit0 == unit &&
                      binSize == resolution;
@@ -513,7 +512,7 @@ bool readFooterURL(CURL *curl, int64_t master, int32_t version, int32_t c1, int3
         int32_t nNormalizationFactors = readInt32FromFile(newFin5);
 
         currentPointer += 4;
-        delete buffer;
+        free(buffer);
 
         currentPointer += readThroughNormalizationFactorsURL(curl, currentPointer, version, store, expectedValues, c1, nNormalizationFactors);
     }
@@ -532,7 +531,7 @@ bool readFooterURL(CURL *curl, int64_t master, int32_t version, int32_t c1, int3
     nExpectedValues = readInt32FromFile(newFin6);
 
     currentPointer += 4;
-    delete buffer;
+    free(buffer);
     for (int i = 0; i < nExpectedValues; i++) {
         buffer = getData(curl, currentPointer, 1000);
 
@@ -559,7 +558,7 @@ bool readFooterURL(CURL *curl, int64_t master, int32_t version, int32_t c1, int3
         bool store = c1 == c2 && (matrixType == "oe" || matrixType == "expected") && nType == norm && unit0 == unit &&
                      binSize == resolution;
 
-        delete buffer;
+        free(buffer);
 
         currentPointer += readThroughExpectedVectorURL(curl, currentPointer, version, expectedValues, nValues, store, resolution);
 
@@ -569,7 +568,7 @@ bool readFooterURL(CURL *curl, int64_t master, int32_t version, int32_t c1, int3
         int32_t nNormalizationFactors = readInt32FromFile(newFin8);
 
         currentPointer += 4;
-        delete buffer;
+        free(buffer);
 
         currentPointer += readThroughNormalizationFactorsURL(curl, currentPointer, version, store, expectedValues, c1, nNormalizationFactors);
     }
@@ -587,7 +586,7 @@ bool readFooterURL(CURL *curl, int64_t master, int32_t version, int32_t c1, int3
     nEntries = readInt32FromFile(newFin9);
 
     currentPointer += 4;
-    delete buffer;
+    free(buffer);
 
     bool found1 = false;
     bool found2 = false;
@@ -632,7 +631,7 @@ bool readFooterURL(CURL *curl, int64_t master, int32_t version, int32_t c1, int3
             found2 = true;
         }
     }
-    delete buffer;
+    free(buffer);
     if (!found1 || !found2) {
         cerr << "Remote file did not contain " << norm << " normalization vectors for one or both chromosomes at "
              << resolution << " " << unit << endl;
@@ -833,21 +832,22 @@ map<int32_t, indexEntry> readMatrixZoomDataHttp(CURL *curl, int64_t &myFilePosit
         header_size += 5;
     } else {
         cerr << "Unit not understood" << endl;
+        free(first);
         return blockMap;
     }
-    delete first;
+    free(first);
     char *buffer = getData(curl, myFilePosition, header_size);
     memstream fin(buffer, header_size);
     setValuesForMZD(fin, myunit, mySumCounts, mybinsize, myBlockBinCount, myBlockColumnCount, found);
     int32_t nBlocks = readInt32FromFile(fin);
-    delete buffer;
+    free(buffer);
 
     if (found) {
         int32_t chunkSize = nBlocks * (sizeof(int32_t) + sizeof(int64_t) + sizeof(int32_t));
         buffer = getData(curl, myFilePosition + header_size, chunkSize);
         memstream fin2(buffer, chunkSize);
         populateBlockMap(fin2, nBlocks, blockMap);
-        delete buffer;
+        free(buffer);
     } else {
         myFilePosition = myFilePosition + header_size
                          + (nBlocks * (sizeof(int32_t) + sizeof(int64_t) + sizeof(int32_t)));
@@ -1390,9 +1390,12 @@ public:
         }
 
         if (!foundFooter) {
+            stream->close();
+            delete stream;
             return;
         }
         stream->close();
+        delete stream;
 
         if (norm != "NONE") {
             c1Norm = readNormalizationVectorFromFooter(c1NormEntry, version, fileName);
@@ -1416,6 +1419,7 @@ public:
                                   blockColumnCount);
         }
         stream2->close();
+        delete stream2;
 
         if (!isIntra) {
             avgCount = (sumCounts / numBins1) / numBins2;   // <= trying to avoid overflows
@@ -1427,7 +1431,7 @@ public:
         char *buffer = readCompressedBytesFromFile(fileName, cNormEntry);
         memstream bufferin(buffer, cNormEntry.size);
         vector<double> cNorm = readNormalizationVector(bufferin, version);
-        delete buffer;
+        delete[] buffer;
         return cNorm;
     }
 
@@ -1630,7 +1634,7 @@ public:
                                        version, nviPosition, nviLength);
             resolutions = readResolutionsFromHeader(bufin);
             curl_easy_cleanup(curl);
-            delete buffer;
+            free(buffer);
         } else {
             ifstream fin;
             fin.open(fileName, fstream::in | fstream::binary);
@@ -1654,20 +1658,11 @@ public:
     }
 
     vector<chromosome> getChromosomes() {
-        chromosome chromosomes[chromosomeMap.size()];
-        map<string, chromosome>::iterator iter = chromosomeMap.begin();
-        while (iter != chromosomeMap.end()) {
-            chromosome chrom = static_cast<chromosome>(iter->second);
-            chromosomes[chrom.index] = chrom;
-            iter++;
+        vector<chromosome> chromosomes(chromosomeMap.size());
+        for (map<string, chromosome>::iterator iter = chromosomeMap.begin(); iter != chromosomeMap.end(); ++iter) {
+            chromosomes[iter->second.index] = iter->second;
         }
-
-        vector<chromosome> final_chromosomes;
-        final_chromosomes.reserve(chromosomeMap.size());
-        for(int32_t i = 0; i < chromosomeMap.size(); i++){
-            final_chromosomes.push_back(chromosomes[i]);
-        }
-        return final_chromosomes;
+        return chromosomes;
     }
 
     MatrixZoomData * getMatrixZoomData(const string &chr1, const string &chr2, const string &matrixType,
@@ -1715,13 +1710,18 @@ vector<contactRecord> straw(const string &matrixType, const string &norm, const 
     parsePositions((chr1loc), chr1, origRegionIndices[0], origRegionIndices[1], hiCFile->chromosomeMap);
     parsePositions((chr2loc), chr2, origRegionIndices[2], origRegionIndices[3], hiCFile->chromosomeMap);
 
+    vector<contactRecord> result;
     if (hiCFile->chromosomeMap[chr1].index > hiCFile->chromosomeMap[chr2].index) {
         MatrixZoomData *mzd = hiCFile->getMatrixZoomData(chr2, chr1, matrixType, norm, unit, binsize);
-        return mzd->getRecords(origRegionIndices[2], origRegionIndices[3], origRegionIndices[0], origRegionIndices[1]);
+        result = mzd->getRecords(origRegionIndices[2], origRegionIndices[3], origRegionIndices[0], origRegionIndices[1]);
+        delete mzd;
     } else {
         MatrixZoomData *mzd = hiCFile->getMatrixZoomData(chr1, chr2, matrixType, norm, unit, binsize);
-        return mzd->getRecords(origRegionIndices[0], origRegionIndices[1], origRegionIndices[2], origRegionIndices[3]);
+        result = mzd->getRecords(origRegionIndices[0], origRegionIndices[1], origRegionIndices[2], origRegionIndices[3]);
+        delete mzd;
     }
+    delete hiCFile;
+    return result;
 }
 
 vector<vector<float> > strawAsMatrix(const string &matrixType, const string &norm, const string &fileName, const string &chr1loc,
@@ -1740,13 +1740,18 @@ vector<vector<float> > strawAsMatrix(const string &matrixType, const string &nor
     parsePositions((chr1loc), chr1, origRegionIndices[0], origRegionIndices[1], hiCFile->chromosomeMap);
     parsePositions((chr2loc), chr2, origRegionIndices[2], origRegionIndices[3], hiCFile->chromosomeMap);
 
+    vector<vector<float> > result;
     if (hiCFile->chromosomeMap[chr1].index > hiCFile->chromosomeMap[chr2].index) {
         MatrixZoomData *mzd = hiCFile->getMatrixZoomData(chr2, chr1, matrixType, norm, unit, binsize);
-        return mzd->getRecordsAsMatrix(origRegionIndices[2], origRegionIndices[3], origRegionIndices[0], origRegionIndices[1]);
+        result = mzd->getRecordsAsMatrix(origRegionIndices[2], origRegionIndices[3], origRegionIndices[0], origRegionIndices[1]);
+        delete mzd;
     } else {
         MatrixZoomData *mzd = hiCFile->getMatrixZoomData(chr1, chr2, matrixType, norm, unit, binsize);
-        return mzd->getRecordsAsMatrix(origRegionIndices[0], origRegionIndices[1], origRegionIndices[2], origRegionIndices[3]);
+        result = mzd->getRecordsAsMatrix(origRegionIndices[0], origRegionIndices[1], origRegionIndices[2], origRegionIndices[3]);
+        delete mzd;
     }
+    delete hiCFile;
+    return result;
 }
 
 vector<chromosome> getChromosomesForFile(const string &fileName) {
@@ -1792,9 +1797,9 @@ int64_t getNumRecordsForFile(const string &fileName, int32_t binsize, bool inter
     }
 
     vector<chromosome> chromosomes = hiCFile->getChromosomes();
-    for(int32_t i = 0; i < chromosomes.size(); i++){
+    for(int32_t i = 0; i < (int32_t)chromosomes.size(); i++){
         if(chromosomes[i].index <= 0) continue;
-        for(int32_t j = i + indexOffset; j < chromosomes.size(); j++){
+        for(int32_t j = i + indexOffset; j < (int32_t)chromosomes.size(); j++){
             if(chromosomes[j].index <= 0) continue;
             MatrixZoomData *mzd;
             if(chromosomes[i].index > chromosomes[j].index){
@@ -1803,22 +1808,26 @@ int64_t getNumRecordsForFile(const string &fileName, int32_t binsize, bool inter
                 mzd = hiCFile->getMatrixZoomData(chromosomes[i].name, chromosomes[j].name, "observed", "NONE", "BP", binsize);
             }
             totalNumRecords += mzd->getNumberOfTotalRecords();
+            delete mzd;
         }
     }
 
+    delete hiCFile;
     return totalNumRecords;
 }
 
 int64_t getNumRecordsForChromosomes(const string &fileName, int32_t binsize, bool interOnly) {
     HiCFile *hiCFile = new HiCFile(fileName);
     vector<chromosome> chromosomes = hiCFile->getChromosomes();
-    for(int32_t i = 0; i < chromosomes.size(); i++){
+    for(int32_t i = 0; i < (int32_t)chromosomes.size(); i++){
         if(chromosomes[i].index <= 0) continue;
         MatrixZoomData *mzd = hiCFile->getMatrixZoomData(chromosomes[i].name, chromosomes[i].name, "observed", "NONE", "BP", binsize);
         int64_t totalNumRecords = mzd->getNumberOfTotalRecords();
+        delete mzd;
         cout << chromosomes[i].name << " " << totalNumRecords << " ";
         cout << totalNumRecords*12/1000/1000/1000 << " GB" << endl;
     }
+    delete hiCFile;
     return 0;
 }
 
