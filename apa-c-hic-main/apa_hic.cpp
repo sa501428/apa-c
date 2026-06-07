@@ -239,10 +239,6 @@ void addLocalNormSums(std::vector<double>& sums, const std::vector<double>& norm
     }
 }
 
-size_t getNumBinsForChromosome(const chromosome& chrom, int resolution) {
-    return static_cast<size_t>(chrom.length / resolution) + 1;
-}
-
 double averageOf(const std::vector<double>& values) {
     if (values.empty()) {
         return 0.0;
@@ -356,10 +352,16 @@ SparseMaskedContactMatrix buildSparseMaskedMatrix(const std::vector<contactRecor
         const int32_t bin_x = record.binX / resolution;
         const int32_t bin_y = record.binY / resolution;
 
-        if (bin_x >= 0 && static_cast<size_t>(bin_x) < coverage1.size()) {
+        if (bin_x >= 0) {
+            if (static_cast<size_t>(bin_x) >= coverage1.size()) {
+                coverage1.resize(static_cast<size_t>(bin_x) + 1, 0.0);
+            }
             coverage1[static_cast<size_t>(bin_x)] += record.counts;
         }
-        if (bin_y >= 0 && static_cast<size_t>(bin_y) < coverage2.size()) {
+        if (bin_y >= 0) {
+            if (static_cast<size_t>(bin_y) >= coverage2.size()) {
+                coverage2.resize(static_cast<size_t>(bin_y) + 1, 0.0);
+            }
             coverage2[static_cast<size_t>(bin_y)] += record.counts;
         }
 
@@ -381,7 +383,6 @@ SparseMaskedContactMatrix buildSparseMaskedMatrix(const std::vector<contactRecor
 }
 
 void populateOutputsForPair(const PairKey& pair_key, const Options& options,
-                            const std::map<std::string, chromosome>& chromosome_map,
                             std::vector<OutputState>& outputs) {
     const bool is_intra = pair_key.first == pair_key.second;
     const int matrix_width = options.window * 2 + 1;
@@ -432,10 +433,8 @@ void populateOutputsForPair(const PairKey& pair_key, const Options& options,
         max_dist_with_buffer = max_dist + (4 * options.window);
     }
 
-    std::vector<double> norm_vector1(
-        getNumBinsForChromosome(chromosome_map.at(pair_key.first), options.resolution), 0.0);
-    std::vector<double> norm_vector2(
-        getNumBinsForChromosome(chromosome_map.at(pair_key.second), options.resolution), 0.0);
+    std::vector<double> norm_vector1;
+    std::vector<double> norm_vector2;
 
     const SparseMaskedContactMatrix sparse =
         buildSparseMaskedMatrix(records, relevant_bins, options.resolution, is_intra,
@@ -574,7 +573,7 @@ int runAPA(const Options& options) {
     }
 
     for (const auto& pair_key : all_pairs) {
-        populateOutputsForPair(pair_key, options, chromosome_map, outputs);
+        populateOutputsForPair(pair_key, options, outputs);
     }
 
     for (auto& output : outputs) {

@@ -1038,7 +1038,11 @@ public:
         // Capture indexEntry by value so threads don't access blockMap concurrently
         // (map::operator[] is non-const and is not safe for concurrent use).
         for (int32_t blockNumber : blockNumbers) {
-            const indexEntry idx = blockMap.at(blockNumber);
+            map<int32_t, indexEntry>::const_iterator it = blockMap.find(blockNumber);
+            if (it == blockMap.end()) {
+                continue;
+            }
+            const indexEntry idx = it->second;
             futures.push_back(
                 pool.enqueue([this, idx, &origRegionIndices]() {
                     return processBlock(
@@ -1125,7 +1129,10 @@ public:
         set<int32_t> blockNumbers = getBlockNumbers(regionIndices);
         int64_t total = 0;
         for (int32_t blockNumber : blockNumbers) {
-            total += getNumRecordsInBlock(fileName, blockMap[blockNumber], version);
+            map<int32_t, indexEntry>::const_iterator it = blockMap.find(blockNumber);
+            if (it != blockMap.end()) {
+                total += getNumRecordsInBlock(fileName, it->second, version);
+            }
         }
         return total;
     }
