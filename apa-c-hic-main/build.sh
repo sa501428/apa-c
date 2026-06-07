@@ -5,7 +5,7 @@ set -euo pipefail
 ZSTD_CFLAGS="$(pkg-config --cflags libzstd 2>/dev/null || true)"
 ZSTD_LIBS="$(pkg-config --libs libzstd 2>/dev/null || true)"
 
-g++ -std=c++17 -O3 -Wall -Wextra \
+g++ -std=c++17 -O3 -DNDEBUG -march=native -mtune=native -flto -Wall -Wextra \
   ${ZSTD_CFLAGS} \
   -I../straw-master/C++ \
   -o apa_hic \

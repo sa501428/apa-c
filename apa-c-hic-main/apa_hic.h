@@ -16,6 +16,7 @@ struct Options {
     int window = 10;
     int min_dist_bins = -1;
     int max_dist_bins = -1;
+    int threads = 0;
     std::string hic_file;
     std::vector<OutputSpec> outputs;
 };

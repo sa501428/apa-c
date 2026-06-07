@@ -1267,6 +1267,41 @@ vector<vector<float> > strawAsMatrix(const string &matrixType, const string &nor
     return result;
 }
 
+void forEachObservedBlock(const string &fileName,
+                          const string &chr1,
+                          const string &chr2,
+                          int32_t binsize,
+                          const function<void(const vector<contactRecord>&)>& processor) {
+    HiCFile hiCFile(fileName);
+    string first = chr1;
+    string second = chr2;
+    if (hiCFile.chromosomeMap[first].index > hiCFile.chromosomeMap[second].index) {
+        swap(first, second);
+    }
+
+    MatrixZoomData *mzd = hiCFile.getMatrixZoomData(first, second, "observed", "NONE", "BP", binsize);
+    if (mzd == nullptr || !mzd->foundFooter) {
+        delete mzd;
+        return;
+    }
+
+    int64_t regionIndices[4] = {0, mzd->numBins1, 0, mzd->numBins2};
+    set<int32_t> blockNumbers = mzd->getBlockNumbers(regionIndices);
+    for (int32_t blockNumber : blockNumbers) {
+        map<int32_t, indexEntry>::const_iterator it = mzd->blockMap.find(blockNumber);
+        if (it == mzd->blockMap.end()) {
+            continue;
+        }
+
+        vector<contactRecord> blockRecords = readBlock(mzd->fileName, it->second, mzd->version);
+        if (!blockRecords.empty()) {
+            processor(blockRecords);
+        }
+    }
+
+    delete mzd;
+}
+
 vector<chromosome> getChromosomesForFile(const string &fileName) {
     HiCFile hiCFile(fileName);
     return hiCFile.getChromosomes();

@@ -25,6 +25,7 @@
 #define STRAW_H
 
 #include <fstream>
+#include <functional>
 #include <set>
 #include <vector>
 #include <map>
@@ -103,6 +104,12 @@ std::vector<int32_t> getResolutionsForFile(const std::string& fileName);
 int64_t getNumRecordsForFile(const std::string& filename, int32_t binsize, bool interOnly);
 
 int64_t getNumRecordsForChromosomes(const std::string& filename, int32_t binsize, bool interOnly);
+
+void forEachObservedBlock(const std::string& fileName,
+                          const std::string& chr1,
+                          const std::string& chr2,
+                          int32_t binsize,
+                          const std::function<void(const std::vector<contactRecord>&)>& processor);
 
 // Add readHeader declaration
 std::map<std::string, chromosome> readHeader(std::istream &fin, int64_t &masterIndexPosition, 
