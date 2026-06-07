@@ -75,6 +75,7 @@ struct memstream : virtual membuf, std::istream {
     std::istream::pos_type seekoff(std::istream::off_type off,
                                     std::ios_base::seekdir dir,
                                     std::ios_base::openmode which = std::ios_base::in) override {
+        (void)which;
         if (dir == std::ios_base::cur)
             gbump(off);
         else if (dir == std::ios_base::end)

@@ -223,6 +223,7 @@ void populateVectorWithDoubles(istream &fin, vector<double> &vector, int64_t nVa
 
 void readThroughExpectedVector(int32_t version, istream &fin, vector<double> &expectedValues, int64_t nValues,
                                bool store, int32_t resolution) {
+    (void)resolution;
     if (store) {
         if (version > 8) {
             populateVectorWithFloats(fin, expectedValues, nValues);
@@ -268,11 +269,11 @@ void readThroughNormalizationFactors(istream &fin, int32_t version, bool store, 
 bool readFooter(istream &fin, int64_t master, int32_t version, int32_t c1, int32_t c2, const string &matrixType,
                 const string &norm, const string &unit, int32_t resolution, int64_t &myFilePos,
                 indexEntry &c1NormEntry, indexEntry &c2NormEntry, vector<double> &expectedValues) {
-
+    (void)master;
     if (version > 8) {
-        int64_t nBytes = readInt64FromFile(fin);
+        (void)readInt64FromFile(fin);
     } else {
-        int32_t nBytes = readInt32FromFile(fin);
+        (void)readInt32FromFile(fin);
     }
 
     stringstream ss;
@@ -285,7 +286,7 @@ bool readFooter(istream &fin, int64_t master, int32_t version, int32_t c1, int32
         string keyStr;
         getline(fin, keyStr, '\0');
         int64_t fpos = readInt64FromFile(fin);
-        int32_t sizeinbytes = readInt32FromFile(fin);
+        (void)readInt32FromFile(fin); // sizeinbytes — advance position only
         if (keyStr == key) {
             myFilePos = fpos;
             found = true;
@@ -452,8 +453,8 @@ map<int32_t, indexEntry> readMatrix(istream &fin, int64_t myFilePosition, const 
     map<int32_t, indexEntry> blockMap;
 
     fin.seekg(myFilePosition, ios::beg);
-    int32_t c1 = readInt32FromFile(fin);
-    int32_t c2 = readInt32FromFile(fin);
+    (void)readInt32FromFile(fin); // c1 — advance position only
+    (void)readInt32FromFile(fin); // c2 — advance position only
     int32_t nRes = readInt32FromFile(fin);
     int32_t i = 0;
     bool found = false;
@@ -572,6 +573,7 @@ int32_t decompressBlock(indexEntry idx, char *compressedBytes, char *uncompresse
 }
 
 long getNumRecordsInBlock(const string &fileName, indexEntry idx, int32_t version){
+    (void)version;
     if (idx.size <= 0) {
         return 0;
     }
@@ -853,8 +855,8 @@ public:
     }
 
     template<class F>
-    auto enqueue(F&& f) -> std::future<typename std::result_of<F()>::type> {
-        using return_type = typename std::result_of<F()>::type;
+    auto enqueue(F&& f) -> std::future<std::invoke_result_t<F>> {
+        using return_type = std::invoke_result_t<F>;
         auto task = std::make_shared<std::packaged_task<return_type()>>(std::forward<F>(f));
         std::future<return_type> res = task->get_future();
         {
@@ -1023,20 +1025,24 @@ public:
         vector<future<BlockResult>> futures;
         
         // Adjust thread count based on block count and available cores
-        unsigned int maxThreads = thread::hardware_concurrency() - 1;
+        unsigned int hw = thread::hardware_concurrency();
+        unsigned int maxThreads = (hw > 1) ? hw - 1 : 1;
         unsigned int numThreads = max(1u, min(
-            maxThreads,                // Don't use more than available cores minus one
-            static_cast<unsigned int>(blockNumbers.size())  // Don't create more threads than blocks
+            maxThreads,
+            static_cast<unsigned int>(blockNumbers.size())
         ));
-        
+
         ThreadPool pool(numThreads);
 
-        // Submit all tasks to thread pool
+        // Submit all tasks to thread pool.
+        // Capture indexEntry by value so threads don't access blockMap concurrently
+        // (map::operator[] is non-const and is not safe for concurrent use).
         for (int32_t blockNumber : blockNumbers) {
+            const indexEntry idx = blockMap.at(blockNumber);
             futures.push_back(
-                pool.enqueue([this, blockNumber, &origRegionIndices]() {
+                pool.enqueue([this, idx, &origRegionIndices]() {
                     return processBlock(
-                        fileName, blockMap[blockNumber], version,
+                        fileName, idx, version,
                         origRegionIndices, resolution,
                         norm, c1Norm, c2Norm, isIntra,
                         matrixType, expectedValues, avgCount
@@ -1294,6 +1300,7 @@ int64_t getNumRecordsForFile(const string &fileName, int32_t binsize, bool inter
 }
 
 int64_t getNumRecordsForChromosomes(const string &fileName, int32_t binsize, bool interOnly) {
+    (void)interOnly;
     HiCFile *hiCFile = new HiCFile(fileName);
     vector<chromosome> chromosomes = hiCFile->getChromosomes();
     for(int32_t i = 0; i < (int32_t)chromosomes.size(); i++){
