@@ -1,6 +1,6 @@
 #include "apa_hic.h"
 
-#include "../straw-master/C++/straw.h"
+#include "straw.h"
 
 #include <algorithm>
 #include <atomic>
@@ -116,8 +116,8 @@ public:
 
             const int32_t compressed_start_x = valid_start_x / kCompression;
             const int32_t compressed_start_y = valid_start_y / kCompression;
-            const int32_t compressed_end_x = valid_end_x / kCompression;
-            const int32_t compressed_end_y = valid_end_y / kCompression;
+            const int32_t compressed_end_x = (valid_end_x - 1) / kCompression;
+            const int32_t compressed_end_y = (valid_end_y - 1) / kCompression;
 
             for (int32_t row = compressed_start_x; row <= compressed_end_x; ++row) {
                 for (int32_t col = compressed_start_y; col <= compressed_end_y; ++col) {
@@ -409,8 +409,8 @@ DistanceBounds calculateDistanceBounds(const PairWork& pair_work, int window) {
         return bounds;
     }
 
-    bounds.min_dist = min_dist - (4 * window);
-    bounds.max_dist = max_dist + (4 * window);
+    bounds.min_dist = std::max(0, min_dist - (2 * window));
+    bounds.max_dist = max_dist + (2 * window);
     return bounds;
 }
 
@@ -617,11 +617,9 @@ void processPairWork(const PairWork& pair_work,
                 continue;
             }
 
-            if (static_cast<size_t>(bin_x) >= custom_vc_norm_vector1.size()) {
-                custom_vc_norm_vector1.resize(static_cast<size_t>(bin_x) + 1, 0.0);
-            }
-            if (static_cast<size_t>(bin_y) >= custom_vc_norm_vector2.size()) {
-                custom_vc_norm_vector2.resize(static_cast<size_t>(bin_y) + 1, 0.0);
+            if (static_cast<size_t>(bin_x) >= custom_vc_norm_vector1.size() ||
+                static_cast<size_t>(bin_y) >= custom_vc_norm_vector2.size()) {
+                continue;
             }
 
             custom_vc_norm_vector1[static_cast<size_t>(bin_x)] += record.counts;

@@ -1,6 +1,6 @@
 # APA C `.hic`
 
-Direct `.hic` APA implementation in C++ using the bundled `straw` reader.
+Direct `.hic` APA implementation in C++ using the sibling `straw` checkout.
 
 ## What it does
 
@@ -15,9 +15,11 @@ Direct `.hic` APA implementation in C++ using the bundled `straw` reader.
 ## Build
 
 ```bash
-cd /Users/muhammad/Desktop/apaC/apa-c-hic-main
-./build.sh
+./apa-c-hic-main/build.sh
 ```
+
+By default the build uses `../straw/C++` relative to this repository. Set
+`STRAW_CPP_DIR=/path/to/straw/C++` to use another checkout.
 
 ## Usage
 
@@ -30,7 +32,10 @@ cd /Users/muhammad/Desktop/apaC/apa-c-hic-main
 ## Notes
 
 - `--min-dist` and `--max-dist` are in bins, matching the `APA3` style.
-- `--threads` defaults to the machine's available hardware threads.
+- `--threads` defaults to the machine's available hardware threads. Work is
+  dynamically balanced across chromosome pairs without nested thread pools.
+- A worker reuses one `.hic` stream across all data blocks in a chromosome
+  pair, avoiding an open/close cycle per compressed block.
 - Aggregate normalization is always used.
 - Coverage vectors are recomputed locally from raw observed counts instead of relying on `.hic`-stored VC vectors.
 - BEDPE parsing uses the first 6 columns only.
