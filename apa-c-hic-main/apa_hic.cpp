@@ -601,11 +601,11 @@ void processPairWork(const PairWork& pair_work,
     std::vector<double> custom_vc_norm_vector1(static_cast<size_t>(pair_work.num_bins1) + 1, 0.0);
     std::vector<double> custom_vc_norm_vector2(static_cast<size_t>(pair_work.num_bins2) + 1, 0.0);
 
-    forEachObservedBlock(options.hic_file,
-                         pair_work.chr1.name,
-                         pair_work.chr2.name,
-                         options.resolution,
-                         [&](const std::vector<contactRecord>& block_records) {
+    forEachRawObservedBlock(options.hic_file,
+                            pair_work.chr1.name,
+                            pair_work.chr2.name,
+                            options.resolution,
+                            [&](const std::vector<contactRecord>& block_records) {
         for (const auto& record : block_records) {
             if (!(record.counts > 0.0f) || !std::isfinite(record.counts)) {
                 continue;
