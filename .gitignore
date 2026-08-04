@@ -1,3 +1,4 @@
 .DS_Store
 /clear-tools-main
 /test
+run_all_apa_validation.sh
