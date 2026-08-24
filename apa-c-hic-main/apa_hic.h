@@ -17,6 +17,9 @@ struct Options {
     int min_dist_bins = -1;
     int max_dist_bins = -1;
     int threads = 0;
+    // Empty means the default, locally calculated aggregate normalization.
+    // Otherwise this is a normalization stored in the .hic file (for example KR or SCALE).
+    std::string hic_normalization;
     std::string hic_file;
     std::vector<OutputSpec> outputs;
 };

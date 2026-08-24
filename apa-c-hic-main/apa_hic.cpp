@@ -192,6 +192,13 @@ std::string toLower(std::string value) {
     return value;
 }
 
+std::string toUpper(std::string value) {
+    for (char& ch : value) {
+        ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    }
+    return value;
+}
+
 bool isAggNormLabel(const std::string& value) {
     const std::string lower = toLower(value);
     return lower.find("ag") != std::string::npos &&
@@ -598,65 +605,114 @@ void processPairWork(const PairWork& pair_work,
     const RegionsOfInterest roi = buildRegionsOfInterest(pair_work, matrix_width);
     const DistanceBounds distance_bounds = calculateDistanceBounds(pair_work, options.window);
 
-    std::vector<double> custom_vc_norm_vector1(static_cast<size_t>(pair_work.num_bins1) + 1, 0.0);
-    std::vector<double> custom_vc_norm_vector2(static_cast<size_t>(pair_work.num_bins2) + 1, 0.0);
+    const bool use_hic_normalization = !options.hic_normalization.empty();
+    std::vector<double> custom_vc_norm_vector1;
+    std::vector<double> custom_vc_norm_vector2;
+    if (!use_hic_normalization) {
+        custom_vc_norm_vector1.assign(static_cast<size_t>(pair_work.num_bins1) + 1, 0.0);
+        custom_vc_norm_vector2.assign(static_cast<size_t>(pair_work.num_bins2) + 1, 0.0);
+    }
 
-    forEachRawObservedBlock(options.hic_file,
-                            pair_work.chr1.name,
-                            pair_work.chr2.name,
-                            options.resolution,
-                            [&](const std::vector<contactRecord>& block_records) {
-        for (const auto& record : block_records) {
-            if (!(record.counts > 0.0f) || !std::isfinite(record.counts)) {
-                continue;
-            }
+    const auto process_record = [&](int32_t bin_x, int32_t bin_y, float counts) {
+        if (!(counts > 0.0f) || !std::isfinite(counts) || bin_x < 0 || bin_y < 0) {
+            return;
+        }
+        if (bin_x > pair_work.num_bins1 || bin_y > pair_work.num_bins2) {
+            return;
+        }
 
-            const int32_t bin_x = record.binX;
-            const int32_t bin_y = record.binY;
-            if (bin_x < 0 || bin_y < 0) {
-                continue;
-            }
+        if (!use_hic_normalization) {
+            custom_vc_norm_vector1[static_cast<size_t>(bin_x)] += counts;
+            custom_vc_norm_vector2[static_cast<size_t>(bin_y)] += counts;
+        }
 
-            if (static_cast<size_t>(bin_x) >= custom_vc_norm_vector1.size() ||
-                static_cast<size_t>(bin_y) >= custom_vc_norm_vector2.size()) {
-                continue;
-            }
-
-            custom_vc_norm_vector1[static_cast<size_t>(bin_x)] += record.counts;
-            custom_vc_norm_vector2[static_cast<size_t>(bin_y)] += record.counts;
-
-            if (is_intra) {
-                const int32_t dist = std::abs(bin_y - bin_x);
-                if (dist < distance_bounds.min_dist || dist > distance_bounds.max_dist) {
-                    continue;
-                }
-            }
-
-            if (!roi.probablyContainsRecord(bin_x, bin_y)) {
-                continue;
-            }
-
-            for (size_t output_idx = 0; output_idx < roi.loop_maps.size(); ++output_idx) {
-                const auto& loop_map = roi.loop_maps[output_idx];
-                if (loop_map.empty()) {
-                    continue;
-                }
-
-                auto& output_matrix = local_state.outputs[output_idx].matrix;
-                loop_map.forEachContainingBound(bin_x, bin_y, [&](const Bounds2DInfo& bounds) {
-                    const int32_t relative_x = bin_x - bounds.origin_start_x;
-                    const int32_t relative_y = bin_y - bounds.origin_start_y;
-                    output_matrix[static_cast<size_t>(relative_x) * matrix_width + relative_y] += record.counts;
-                });
+        if (is_intra) {
+            const int32_t dist = std::abs(bin_y - bin_x);
+            if (dist < distance_bounds.min_dist || dist > distance_bounds.max_dist) {
+                return;
             }
         }
-    });
+        if (!roi.probablyContainsRecord(bin_x, bin_y)) {
+            return;
+        }
 
-    for (size_t output_idx = 0; output_idx < pair_work.loops_per_output.size(); ++output_idx) {
-        auto& output = local_state.outputs[output_idx];
-        for (const auto& loop : pair_work.loops_per_output[output_idx]) {
-            addLocalNormSums(output.row_sums, custom_vc_norm_vector1, loop.window_start1);
-            addLocalNormSums(output.col_sums, custom_vc_norm_vector2, loop.window_start2);
+        for (size_t output_idx = 0; output_idx < roi.loop_maps.size(); ++output_idx) {
+            const auto& loop_map = roi.loop_maps[output_idx];
+            if (loop_map.empty()) {
+                continue;
+            }
+
+            auto& output_matrix = local_state.outputs[output_idx].matrix;
+            loop_map.forEachContainingBound(bin_x, bin_y, [&](const Bounds2DInfo& bounds) {
+                const int32_t relative_x = bin_x - bounds.origin_start_x;
+                const int32_t relative_y = bin_y - bounds.origin_start_y;
+                output_matrix[static_cast<size_t>(relative_x) * matrix_width + relative_y] += counts;
+            });
+        }
+    };
+
+    if (use_hic_normalization) {
+        // strawStream returns genomic positions, whereas the raw block API returns bin indices.
+        size_t normalized_record_count = 0;
+        strawStream("observed",
+                    options.hic_normalization,
+                    options.hic_file,
+                    pair_work.chr1.name,
+                    pair_work.chr2.name,
+                    "BP",
+                    options.resolution,
+                    [&](const contactRecord& record) {
+            if (record.counts > 0.0f && std::isfinite(record.counts)) {
+                ++normalized_record_count;
+            }
+            process_record(record.binX / options.resolution,
+                           record.binY / options.resolution,
+                           record.counts);
+        });
+
+        // straw reports a missing normalization by returning no records. Distinguish that
+        // from an actually empty matrix so a misspelled or unavailable norm cannot silently
+        // produce an all-zero APA result. This extra raw scan only runs on the error/empty path.
+        if (normalized_record_count == 0) {
+            bool raw_matrix_has_records = false;
+            forEachRawObservedBlock(options.hic_file,
+                                    pair_work.chr1.name,
+                                    pair_work.chr2.name,
+                                    options.resolution,
+                                    [&](const std::vector<contactRecord>& block_records) {
+                if (raw_matrix_has_records) {
+                    return;
+                }
+                raw_matrix_has_records = std::any_of(
+                    block_records.begin(), block_records.end(), [](const contactRecord& record) {
+                        return record.counts > 0.0f && std::isfinite(record.counts);
+                    });
+            });
+            if (raw_matrix_has_records) {
+                throw std::runtime_error(
+                    ".hic normalization " + options.hic_normalization +
+                    " is unavailable or has no usable values for " + pair_work.chr1.name +
+                    " / " + pair_work.chr2.name + " at resolution " +
+                    std::to_string(options.resolution));
+            }
+        }
+    } else {
+        forEachRawObservedBlock(options.hic_file,
+                                pair_work.chr1.name,
+                                pair_work.chr2.name,
+                                options.resolution,
+                                [&](const std::vector<contactRecord>& block_records) {
+            for (const auto& record : block_records) {
+                process_record(record.binX, record.binY, record.counts);
+            }
+        });
+
+        for (size_t output_idx = 0; output_idx < pair_work.loops_per_output.size(); ++output_idx) {
+            auto& output = local_state.outputs[output_idx];
+            for (const auto& loop : pair_work.loops_per_output[output_idx]) {
+                addLocalNormSums(output.row_sums, custom_vc_norm_vector1, loop.window_start1);
+                addLocalNormSums(output.col_sums, custom_vc_norm_vector2, loop.window_start2);
+            }
         }
     }
 
@@ -670,13 +726,14 @@ void processPairWork(const PairWork& pair_work,
 
 void printUsage(std::ostream& out) {
     out << "Usage: apa_hic [--window W] [--min-dist BINS] [--max-dist BINS] [--threads N]\n"
-        << "               [--include-inter] [-r RESOLUTION]\n"
+        << "               [--include-inter] [-r RESOLUTION] [-k HIC_NORM]\n"
         << "               <input.hic> <loops1.bedpe> <output1.{npy,txt}> [<loops2.bedpe> <output2...> ...]\n"
         << "\n"
         << "Notes:\n"
         << "  --min-dist/--max-dist are interpreted in bins, matching APA3-style behavior.\n"
-        << "  Aggregate normalization is always used.\n"
-        << "  Coverage vectors are recomputed locally from raw observed counts.\n"
+        << "  The default is locally calculated aggregate normalization.\n"
+        << "  -k/--norm uses a normalization stored in the .hic file (for example KR or SCALE).\n"
+        << "  --ag-norm explicitly selects the default aggregate normalization.\n"
         << "  Loop files are BEDPE-like; only the first 6 columns are required.\n";
 }
 
@@ -687,6 +744,7 @@ Options parseOptions(int argc, char* argv[]) {
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--ag-norm") {
+            options.hic_normalization.clear();
             continue;
         } else if (arg == "--include-inter") {
             options.include_inter = true;
@@ -702,10 +760,10 @@ Options parseOptions(int argc, char* argv[]) {
             options.threads = parseIntOption(nextValue(argc, argv, i, arg), arg);
         } else if (arg == "-k" || arg == "--norm") {
             const std::string norm_arg = nextValue(argc, argv, i, arg);
-            if (!isAggNormLabel(norm_arg)) {
-                throw std::runtime_error(
-                    "Only aggregate normalization is supported; omit --norm or use --ag-norm.");
+            if (norm_arg.empty()) {
+                throw std::runtime_error("Normalization name cannot be empty");
             }
+            options.hic_normalization = isAggNormLabel(norm_arg) ? "" : toUpper(norm_arg);
         } else if (arg == "-h" || arg == "--help") {
             printUsage(std::cout);
             std::exit(0);
@@ -819,7 +877,9 @@ int runAPA(const Options& options) {
     }
 
     for (size_t output_idx = 0; output_idx < global_outputs.size(); ++output_idx) {
-        applyAggregateNormalization(global_outputs[output_idx], matrix_width);
+        if (options.hic_normalization.empty()) {
+            applyAggregateNormalization(global_outputs[output_idx], matrix_width);
+        }
         std::cout << "Writing " << options.outputs[output_idx].output_file << std::endl;
         saveMatrix(options.outputs[output_idx].output_file, global_outputs[output_idx].matrix, matrix_width);
     }
