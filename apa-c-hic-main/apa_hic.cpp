@@ -3,8 +3,10 @@
 #include "straw.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
+#include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -20,6 +22,12 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include <zlib.h>
+
+#ifdef HAVE_HTSLIB
+#include <htslib/hts.h>
+#include <htslib/sam.h>
+#endif
 
 namespace {
 
@@ -162,11 +170,13 @@ struct RegionsOfInterest {
     std::vector<uint8_t> all_row_indices;
     std::vector<uint8_t> all_col_indices;
 
-    bool probablyContainsRecord(int32_t bin_x, int32_t bin_y) const {
-        return bin_x >= 0 && bin_y >= 0 &&
-               static_cast<size_t>(bin_x) < all_row_indices.size() &&
-               static_cast<size_t>(bin_y) < all_col_indices.size() &&
-               all_row_indices[static_cast<size_t>(bin_x)] != 0 &&
+    bool containsRow(int32_t bin_x) const {
+        return bin_x >= 0 && static_cast<size_t>(bin_x) < all_row_indices.size() &&
+               all_row_indices[static_cast<size_t>(bin_x)] != 0;
+    }
+
+    bool containsColumn(int32_t bin_y) const {
+        return bin_y >= 0 && static_cast<size_t>(bin_y) < all_col_indices.size() &&
                all_col_indices[static_cast<size_t>(bin_y)] != 0;
     }
 };
@@ -178,6 +188,21 @@ struct DistanceBounds {
 
 struct ThreadLocalState {
     std::vector<OutputBuffers> outputs;
+};
+
+struct PairsLayout {
+    int chrom1 = 1;
+    int pos1 = 2;
+    int chrom2 = 3;
+    int pos2 = 4;
+};
+
+struct StreamPairState {
+    const PairWork* work = nullptr;
+    RegionsOfInterest roi;
+    DistanceBounds distance_bounds;
+    std::vector<double> vc1;
+    std::vector<double> vc2;
 };
 
 PairKey makePairKey(int32_t chr1_index, int32_t chr2_index) {
@@ -210,6 +235,48 @@ bool endsWith(const std::string& value, const std::string& suffix) {
            value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
+std::string stripGzipSuffix(std::string value) {
+    if (endsWith(toLower(value), ".gz")) {
+        value.resize(value.size() - 3);
+    }
+    return value;
+}
+
+InputFormat detectInputFormat(const std::string& file_name) {
+    const std::string lower = toLower(stripGzipSuffix(file_name));
+    if (endsWith(lower, ".hic")) {
+        return InputFormat::Hic;
+    }
+    if (endsWith(lower, ".pairs")) {
+        return InputFormat::Pairs;
+    }
+    if (endsWith(lower, ".bam")) {
+        return InputFormat::Bam;
+    }
+    throw std::runtime_error(
+        "Cannot determine input format for " + file_name +
+        "; use --input-format hic, pairs, or bam");
+}
+
+InputFormat parseInputFormat(const std::string& value) {
+    const std::string lower = toLower(value);
+    if (lower == "auto") return InputFormat::Auto;
+    if (lower == "hic") return InputFormat::Hic;
+    if (lower == "pairs") return InputFormat::Pairs;
+    if (lower == "bam") return InputFormat::Bam;
+    throw std::runtime_error("Unknown input format: " + value);
+}
+
+const char* inputFormatName(InputFormat format) {
+    switch (format) {
+        case InputFormat::Hic: return ".hic";
+        case InputFormat::Pairs: return "pairs";
+        case InputFormat::Bam: return "BAM";
+        case InputFormat::Auto: break;
+    }
+    return "input";
+}
+
 void requireValue(int argc, int index, const std::string& option) {
     if (index + 1 >= argc) {
         throw std::runtime_error("Missing value for option " + option);
@@ -239,11 +306,378 @@ std::unordered_map<std::string, chromosome> buildChromosomeMap(const std::vector
     return by_name;
 }
 
+class TextLineReader {
+public:
+    explicit TextLineReader(const std::string& file_name) : file_name_(file_name) {
+        file_ = gzopen(file_name.c_str(), "rb");
+        if (file_ == nullptr) {
+            throw std::runtime_error("Cannot open pairs file: " + file_name);
+        }
+    }
+
+    ~TextLineReader() {
+        if (file_ != nullptr) {
+            gzclose(file_);
+        }
+    }
+
+    bool next(std::string& line) {
+        line.clear();
+        while (true) {
+            char* result = gzgets(file_, buffer_.data(), static_cast<int>(buffer_.size()));
+            if (result == nullptr) {
+                if (gzeof(file_)) {
+                    return !line.empty();
+                }
+                int error_number = Z_OK;
+                const char* message = gzerror(file_, &error_number);
+                throw std::runtime_error("Error reading " + file_name_ + ": " +
+                                         (message == nullptr ? "unknown zlib error" : message));
+            }
+
+            line.append(buffer_.data());
+            if (!line.empty() && line.back() == '\n') {
+                line.pop_back();
+                if (!line.empty() && line.back() == '\r') {
+                    line.pop_back();
+                }
+                return true;
+            }
+        }
+    }
+
+private:
+    std::string file_name_;
+    gzFile file_ = nullptr;
+    std::array<char, 64 * 1024> buffer_{};
+};
+
+std::vector<std::string_view> splitFields(const std::string& line) {
+    std::vector<std::string_view> fields;
+    const char* cursor = line.data();
+    const char* end = cursor + line.size();
+    while (cursor < end) {
+        while (cursor < end && (*cursor == ' ' || *cursor == '\t')) {
+            ++cursor;
+        }
+        if (cursor == end) {
+            break;
+        }
+        const char* start = cursor;
+        while (cursor < end && *cursor != ' ' && *cursor != '\t') {
+            ++cursor;
+        }
+        fields.emplace_back(start, static_cast<size_t>(cursor - start));
+    }
+    return fields;
+}
+
+int64_t parseCoordinate(std::string_view field, const std::string& file_name, size_t line_number) {
+    int64_t value = 0;
+    const auto parsed = std::from_chars(field.data(), field.data() + field.size(), value);
+    if (parsed.ec != std::errc() || parsed.ptr != field.data() + field.size()) {
+        throw std::runtime_error("Invalid coordinate in " + file_name + " at line " +
+                                 std::to_string(line_number));
+    }
+    return value;
+}
+
+bool updatePairsLayout(const std::string& line, PairsLayout& layout) {
+    constexpr std::string_view prefix = "#columns:";
+    if (line.size() < prefix.size() ||
+        std::string_view(line.data(), prefix.size()) != prefix) {
+        return false;
+    }
+
+    const std::string columns_text = line.substr(prefix.size());
+    const auto columns = splitFields(columns_text);
+    auto find_column = [&](std::initializer_list<std::string_view> names) {
+        for (size_t i = 0; i < columns.size(); ++i) {
+            for (std::string_view name : names) {
+                if (columns[i] == name) {
+                    return static_cast<int>(i);
+                }
+            }
+        }
+        return -1;
+    };
+
+    const PairsLayout declared{
+        find_column({"chrom1", "chr1"}),
+        find_column({"pos1"}),
+        find_column({"chrom2", "chr2"}),
+        find_column({"pos2"}),
+    };
+    if (declared.chrom1 < 0 || declared.pos1 < 0 ||
+        declared.chrom2 < 0 || declared.pos2 < 0) {
+        throw std::runtime_error(
+            "pairs #columns header must contain chrom1, pos1, chrom2, and pos2");
+    }
+    layout = declared;
+    return true;
+}
+
+bool parsePairsDataLine(const std::string& line,
+                        const PairsLayout& layout,
+                        const std::string& file_name,
+                        size_t line_number,
+                        std::string_view& chrom1,
+                        int64_t& pos1,
+                        std::string_view& chrom2,
+                        int64_t& pos2) {
+    if (line.empty() || line[0] == '#') {
+        return false;
+    }
+    const int max_column = std::max({layout.chrom1, layout.pos1, layout.chrom2, layout.pos2});
+    constexpr size_t max_supported_columns = 128;
+    if (max_column < 0 || static_cast<size_t>(max_column) >= max_supported_columns) {
+        throw std::runtime_error("Required pairs column is beyond the supported 128-column limit");
+    }
+
+    // Contact lines dominate runtime. Split only through the last required
+    // column into stack-backed views, avoiding per-contact vector allocations.
+    const std::array<int, 4> required_columns{
+        layout.chrom1, layout.pos1, layout.chrom2, layout.pos2};
+    std::array<std::string_view, 4> required_fields{};
+    size_t field_count = 0;
+    const char* cursor = line.data();
+    const char* end = cursor + line.size();
+    while (cursor < end && field_count <= static_cast<size_t>(max_column)) {
+        while (cursor < end && (*cursor == ' ' || *cursor == '\t')) ++cursor;
+        if (cursor == end) break;
+        const char* start = cursor;
+        while (cursor < end && *cursor != ' ' && *cursor != '\t') ++cursor;
+        const std::string_view field(start, static_cast<size_t>(cursor - start));
+        for (size_t required = 0; required < required_columns.size(); ++required) {
+            if (required_columns[required] == static_cast<int>(field_count)) {
+                required_fields[required] = field;
+            }
+        }
+        ++field_count;
+    }
+    if (field_count <= static_cast<size_t>(max_column)) {
+        throw std::runtime_error("Invalid pairs line in " + file_name + " at line " +
+                                 std::to_string(line_number));
+    }
+    chrom1 = required_fields[0];
+    pos1 = parseCoordinate(required_fields[1], file_name, line_number);
+    chrom2 = required_fields[2];
+    pos2 = parseCoordinate(required_fields[3], file_name, line_number);
+    // 4DN/DCIC pairs coordinates are 1-based. Convert to the zero-based
+    // coordinates used by BAM and by the binning logic below.
+    pos1 = std::max<int64_t>(0, pos1 - 1);
+    pos2 = std::max<int64_t>(0, pos2 - 1);
+    return true;
+}
+
+std::vector<chromosome> getChromosomesForPairs(const std::string& file_name) {
+    TextLineReader reader(file_name);
+    PairsLayout layout;
+    std::vector<chromosome> chromosomes;
+    std::unordered_map<std::string, size_t> indices;
+
+    auto add_chromosome = [&](std::string_view name, int64_t length) {
+        if (name.empty() || name == "!") {
+            return;
+        }
+        const std::string owned_name(name);
+        const auto existing = indices.find(owned_name);
+        if (existing == indices.end()) {
+            const size_t index = chromosomes.size();
+            indices.emplace(owned_name, index);
+            chromosomes.push_back(chromosome{owned_name, static_cast<int32_t>(index), length});
+        } else {
+            chromosomes[existing->second].length =
+                std::max(chromosomes[existing->second].length, length);
+        }
+    };
+
+    bool has_declared_sizes = false;
+    std::string line;
+    size_t line_number = 0;
+    while (reader.next(line)) {
+        ++line_number;
+        if (updatePairsLayout(line, layout)) {
+            continue;
+        }
+        constexpr std::string_view chromsize_prefix = "#chromsize:";
+        if (line.size() >= chromsize_prefix.size() &&
+            std::string_view(line.data(), chromsize_prefix.size()) == chromsize_prefix) {
+            const auto fields = splitFields(line.substr(chromsize_prefix.size()));
+            if (fields.size() < 2) {
+                throw std::runtime_error("Invalid #chromsize header in " + file_name +
+                                         " at line " + std::to_string(line_number));
+            }
+            const int64_t length = parseCoordinate(fields[1], file_name, line_number);
+            if (length <= 0) {
+                throw std::runtime_error("Chromosome size must be positive in " + file_name +
+                                         " at line " + std::to_string(line_number));
+            }
+            add_chromosome(fields[0], length);
+            has_declared_sizes = true;
+            continue;
+        }
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+        if (has_declared_sizes) {
+            // A standard pairs header declares the chromosome dictionary. Avoid
+            // an unnecessary full discovery scan of large inputs when it does.
+            break;
+        }
+
+        std::string_view chrom1;
+        std::string_view chrom2;
+        int64_t pos1 = 0;
+        int64_t pos2 = 0;
+        if (parsePairsDataLine(line, layout, file_name, line_number,
+                               chrom1, pos1, chrom2, pos2)) {
+            add_chromosome(chrom1, pos1 + 1);
+            add_chromosome(chrom2, pos2 + 1);
+        }
+    }
+
+    if (chromosomes.empty()) {
+        throw std::runtime_error("No chromosomes found in pairs file: " + file_name);
+    }
+    if (!has_declared_sizes) {
+        std::cerr << "Warning: " << file_name
+                  << " has no #chromsize header; chromosome lengths were inferred from contacts"
+                  << std::endl;
+    }
+    return chromosomes;
+}
+
+template <typename Fn>
+void forEachPairsContact(const std::string& file_name,
+                         const std::unordered_map<std::string, chromosome>& chromosome_map,
+                         Fn&& fn) {
+    TextLineReader reader(file_name);
+    PairsLayout layout;
+    std::string cached_chrom1_name;
+    std::string cached_chrom2_name;
+    int32_t cached_chrom1_index = -1;
+    int32_t cached_chrom2_index = -1;
+    auto resolve_chromosome = [&](std::string_view name,
+                                  std::string& cached_name,
+                                  int32_t& cached_index) {
+        if (name == cached_name) {
+            return cached_index;
+        }
+        cached_name.assign(name.data(), name.size());
+        const auto found = chromosome_map.find(cached_name);
+        cached_index = found == chromosome_map.end() ? -1 : found->second.index;
+        return cached_index;
+    };
+    std::string line;
+    size_t line_number = 0;
+    while (reader.next(line)) {
+        ++line_number;
+        if (updatePairsLayout(line, layout) || line.empty() || line[0] == '#') {
+            continue;
+        }
+        std::string_view chrom1_name;
+        std::string_view chrom2_name;
+        int64_t pos1 = 0;
+        int64_t pos2 = 0;
+        if (!parsePairsDataLine(line, layout, file_name, line_number,
+                                chrom1_name, pos1, chrom2_name, pos2)) {
+            continue;
+        }
+        const int32_t chr1_index = resolve_chromosome(
+            chrom1_name, cached_chrom1_name, cached_chrom1_index);
+        const int32_t chr2_index = resolve_chromosome(
+            chrom2_name, cached_chrom2_name, cached_chrom2_index);
+        if (chr1_index < 0 || chr2_index < 0) {
+            continue;
+        }
+        fn(chr1_index, pos1, chr2_index, pos2);
+    }
+}
+
+std::vector<chromosome> getChromosomesForBam(const std::string& file_name) {
+#ifdef HAVE_HTSLIB
+    samFile* file = sam_open(file_name.c_str(), "rb");
+    if (file == nullptr) {
+        throw std::runtime_error("Cannot open BAM file: " + file_name);
+    }
+    sam_hdr_t* header = sam_hdr_read(file);
+    if (header == nullptr) {
+        sam_close(file);
+        throw std::runtime_error("Cannot read BAM header: " + file_name);
+    }
+    std::vector<chromosome> chromosomes;
+    chromosomes.reserve(static_cast<size_t>(header->n_targets));
+    for (int32_t i = 0; i < header->n_targets; ++i) {
+        chromosomes.push_back(chromosome{
+            header->target_name[i], i, static_cast<int64_t>(header->target_len[i])});
+    }
+    sam_hdr_destroy(header);
+    sam_close(file);
+    if (chromosomes.empty()) {
+        throw std::runtime_error("BAM header has no reference sequences: " + file_name);
+    }
+    return chromosomes;
+#else
+    (void)file_name;
+    throw std::runtime_error(
+        "BAM input is unavailable because apa_hic was built without htslib; install htslib and rebuild");
+#endif
+}
+
+template <typename Fn>
+void forEachBamContact(const Options& options, Fn&& fn) {
+#ifdef HAVE_HTSLIB
+    samFile* file = sam_open(options.input_file.c_str(), "rb");
+    if (file == nullptr) {
+        throw std::runtime_error("Cannot open BAM file: " + options.input_file);
+    }
+    if (options.threads > 1) {
+        hts_set_threads(file, options.threads);
+    }
+    sam_hdr_t* header = sam_hdr_read(file);
+    bam1_t* record = bam_init1();
+    if (header == nullptr || record == nullptr) {
+        if (record != nullptr) bam_destroy1(record);
+        if (header != nullptr) sam_hdr_destroy(header);
+        sam_close(file);
+        throw std::runtime_error("Cannot initialize BAM reader for " + options.input_file);
+    }
+
+    int status = 0;
+    while ((status = sam_read1(file, header, record)) >= 0) {
+        const uint16_t flag = record->core.flag;
+        const uint16_t excluded = BAM_FUNMAP | BAM_FMUNMAP | BAM_FSECONDARY |
+                                  BAM_FSUPPLEMENTARY | BAM_FQCFAIL | BAM_FDUP;
+        if ((flag & excluded) != 0 || (flag & BAM_FPAIRED) == 0 ||
+            (flag & BAM_FREAD1) == 0 || record->core.tid < 0 || record->core.mtid < 0 ||
+            record->core.pos < 0 || record->core.mpos < 0) {
+            continue;
+        }
+        fn(record->core.tid,
+           static_cast<int64_t>(record->core.pos),
+           record->core.mtid,
+           static_cast<int64_t>(record->core.mpos));
+    }
+    bam_destroy1(record);
+    sam_hdr_destroy(header);
+    sam_close(file);
+    if (status < -1) {
+        throw std::runtime_error("Error reading BAM records from " + options.input_file);
+    }
+#else
+    (void)options;
+    (void)fn;
+    throw std::runtime_error(
+        "BAM input is unavailable because apa_hic was built without htslib; install htslib and rebuild");
+#endif
+}
+
 void validateResolutionAvailable(const Options& options) {
-    const std::vector<int32_t> resolutions = getResolutionsForFile(options.hic_file);
+    const std::vector<int32_t> resolutions = getResolutionsForFile(options.input_file);
     if (std::find(resolutions.begin(), resolutions.end(), options.resolution) == resolutions.end()) {
         std::ostringstream oss;
-        oss << "Resolution " << options.resolution << " is not available in " << options.hic_file << ". Available:";
+        oss << "Resolution " << options.resolution << " is not available in " << options.input_file << ". Available:";
         for (int32_t resolution : resolutions) {
             oss << " " << resolution;
         }
@@ -589,10 +1023,10 @@ unsigned int getThreadCount(const Options& options, size_t num_pairs) {
     return std::max(1U, std::min(configured_threads, static_cast<unsigned int>(std::max<size_t>(1, num_pairs))));
 }
 
-void processPairWork(const PairWork& pair_work,
-                     const Options& options,
-                     ThreadLocalState& local_state,
-                     std::mutex& io_mutex) {
+void processHicPairWork(const PairWork& pair_work,
+                        const Options& options,
+                        ThreadLocalState& local_state,
+                        std::mutex& io_mutex) {
     const int matrix_width = options.window * 2 + 1;
     const bool is_intra = pair_work.chr1.index == pair_work.chr2.index;
 
@@ -621,9 +1055,19 @@ void processPairWork(const PairWork& pair_work,
             return;
         }
 
-        if (!use_hic_normalization) {
+        const bool row_is_needed = roi.containsRow(bin_x);
+        const bool column_is_needed = roi.containsColumn(bin_y);
+        if (!use_hic_normalization && row_is_needed) {
             custom_vc_norm_vector1[static_cast<size_t>(bin_x)] += counts;
+        }
+        if (!use_hic_normalization && column_is_needed) {
             custom_vc_norm_vector2[static_cast<size_t>(bin_y)] += counts;
+        }
+
+        // A one-axis overlap is still needed for the corresponding VC value,
+        // but a matrix contribution requires both axes to overlap an ROI.
+        if (!row_is_needed || !column_is_needed) {
+            return;
         }
 
         if (is_intra) {
@@ -632,10 +1076,6 @@ void processPairWork(const PairWork& pair_work,
                 return;
             }
         }
-        if (!roi.probablyContainsRecord(bin_x, bin_y)) {
-            return;
-        }
-
         for (size_t output_idx = 0; output_idx < roi.loop_maps.size(); ++output_idx) {
             const auto& loop_map = roi.loop_maps[output_idx];
             if (loop_map.empty()) {
@@ -656,7 +1096,7 @@ void processPairWork(const PairWork& pair_work,
         size_t normalized_record_count = 0;
         strawStream("observed",
                     options.hic_normalization,
-                    options.hic_file,
+                    options.input_file,
                     pair_work.chr1.name,
                     pair_work.chr2.name,
                     "BP",
@@ -675,7 +1115,7 @@ void processPairWork(const PairWork& pair_work,
         // produce an all-zero APA result. This extra raw scan only runs on the error/empty path.
         if (normalized_record_count == 0) {
             bool raw_matrix_has_records = false;
-            forEachRawObservedBlock(options.hic_file,
+            forEachRawObservedBlock(options.input_file,
                                     pair_work.chr1.name,
                                     pair_work.chr2.name,
                                     options.resolution,
@@ -697,7 +1137,7 @@ void processPairWork(const PairWork& pair_work,
             }
         }
     } else {
-        forEachRawObservedBlock(options.hic_file,
+        forEachRawObservedBlock(options.input_file,
                                 pair_work.chr1.name,
                                 pair_work.chr2.name,
                                 options.resolution,
@@ -722,17 +1162,135 @@ void processPairWork(const PairWork& pair_work,
     }
 }
 
+void processStreamInput(const std::vector<PairWork>& pair_work,
+                        const std::unordered_map<std::string, chromosome>& chromosome_map,
+                        const Options& options,
+                        std::vector<OutputBuffers>& outputs) {
+    const int matrix_width = options.window * 2 + 1;
+    std::vector<StreamPairState> states;
+    states.reserve(pair_work.size());
+    std::unordered_map<PairKey, size_t> state_by_pair;
+    state_by_pair.reserve(pair_work.size());
+
+    for (const auto& work : pair_work) {
+        StreamPairState state;
+        state.work = &work;
+        state.roi = buildRegionsOfInterest(work, matrix_width);
+        state.distance_bounds = calculateDistanceBounds(work, options.window);
+        state.vc1.assign(static_cast<size_t>(work.num_bins1) + 1, 0.0);
+        state.vc2.assign(static_cast<size_t>(work.num_bins2) + 1, 0.0);
+        state_by_pair.emplace(work.key, states.size());
+        states.push_back(std::move(state));
+    }
+
+    uint64_t input_contacts = 0;
+    uint64_t relevant_contacts = 0;
+    const auto process_contact = [&](int32_t chr1_index,
+                                     int64_t pos1,
+                                     int32_t chr2_index,
+                                     int64_t pos2) {
+        ++input_contacts;
+        if (chr1_index > chr2_index ||
+            (chr1_index == chr2_index && pos1 > pos2)) {
+            std::swap(chr1_index, chr2_index);
+            std::swap(pos1, pos2);
+        }
+        const auto state_it = state_by_pair.find(makePairKey(chr1_index, chr2_index));
+        if (state_it == state_by_pair.end()) {
+            return;
+        }
+
+        StreamPairState& state = states[state_it->second];
+        const PairWork& work = *state.work;
+        const int64_t bin_x64 = pos1 / options.resolution;
+        const int64_t bin_y64 = pos2 / options.resolution;
+        if (bin_x64 < 0 || bin_y64 < 0 ||
+            bin_x64 > work.num_bins1 || bin_y64 > work.num_bins2) {
+            return;
+        }
+        const int32_t bin_x = static_cast<int32_t>(bin_x64);
+        const int32_t bin_y = static_cast<int32_t>(bin_y64);
+        const bool row_is_needed = state.roi.containsRow(bin_x);
+        const bool column_is_needed = state.roi.containsColumn(bin_y);
+        if (!row_is_needed && !column_is_needed) {
+            return;
+        }
+        ++relevant_contacts;
+        if (row_is_needed) {
+            state.vc1[static_cast<size_t>(bin_x)] += 1.0;
+        }
+        if (column_is_needed) {
+            state.vc2[static_cast<size_t>(bin_y)] += 1.0;
+        }
+
+        // Contacts with only one relevant axis have now served their VC
+        // purpose and can be discarded before distance and exact-ROI checks.
+        if (!row_is_needed || !column_is_needed) {
+            return;
+        }
+
+        if (chr1_index == chr2_index) {
+            const int32_t distance = std::abs(bin_y - bin_x);
+            if (distance < state.distance_bounds.min_dist ||
+                distance > state.distance_bounds.max_dist) {
+                return;
+            }
+        }
+        for (size_t output_idx = 0; output_idx < state.roi.loop_maps.size(); ++output_idx) {
+            const auto& loop_map = state.roi.loop_maps[output_idx];
+            if (loop_map.empty()) {
+                continue;
+            }
+            auto& matrix = outputs[output_idx].matrix;
+            loop_map.forEachContainingBound(bin_x, bin_y, [&](const Bounds2DInfo& bounds) {
+                const int32_t relative_x = bin_x - bounds.origin_start_x;
+                const int32_t relative_y = bin_y - bounds.origin_start_y;
+                matrix[static_cast<size_t>(relative_x) * matrix_width + relative_y] += 1.0f;
+            });
+        }
+    };
+
+    std::cout << "Scanning " << inputFormatName(options.input_format) << " contacts from "
+              << options.input_file << std::endl;
+    if (options.input_format == InputFormat::Pairs) {
+        forEachPairsContact(options.input_file, chromosome_map, process_contact);
+    } else if (options.input_format == InputFormat::Bam) {
+        forEachBamContact(options, process_contact);
+    } else {
+        throw std::runtime_error("Internal error: stream processing requested for non-stream input");
+    }
+
+    for (auto& state : states) {
+        const PairWork& work = *state.work;
+        for (size_t output_idx = 0; output_idx < work.loops_per_output.size(); ++output_idx) {
+            auto& output = outputs[output_idx];
+            for (const auto& loop : work.loops_per_output[output_idx]) {
+                addLocalNormSums(output.row_sums, state.vc1, loop.window_start1);
+                addLocalNormSums(output.col_sums, state.vc2, loop.window_start2);
+            }
+        }
+    }
+
+    std::cout << "Read " << input_contacts << " usable contacts; " << relevant_contacts
+              << " overlapped at least one retained ROI axis" << std::endl;
+}
+
 }  // namespace
 
 void printUsage(std::ostream& out) {
     out << "Usage: apa_hic [--window W] [--min-dist BINS] [--max-dist BINS] [--threads N]\n"
         << "               [--include-inter] [-r RESOLUTION] [-k HIC_NORM]\n"
-        << "               <input.hic> <loops1.bedpe> <output1.{npy,txt}> [<loops2.bedpe> <output2...> ...]\n"
+        << "               [--input-format auto|hic|pairs|bam]\n"
+        << "               <input.{hic,pairs,pairs.gz,bam}> <loops1.bedpe> <output1.{npy,txt}>\n"
+        << "               [<loops2.bedpe> <output2...> ...]\n"
         << "\n"
         << "Notes:\n"
         << "  --min-dist/--max-dist are interpreted in bins, matching APA3-style behavior.\n"
         << "  The default is locally calculated aggregate normalization.\n"
-        << "  -k/--norm uses a normalization stored in the .hic file (for example KR or SCALE).\n"
+        << "  pairs and BAM inputs support aggregate normalization only.\n"
+        << "  pairs coordinates follow the 1-based 4DN/DCIC convention.\n"
+        << "  BAM input uses primary, non-duplicate read1 records and their mate positions.\n"
+        << "  -k/--norm uses a normalization stored in a .hic file (for example KR or SCALE).\n"
         << "  --ag-norm explicitly selects the default aggregate normalization.\n"
         << "  Loop files are BEDPE-like; only the first 6 columns are required.\n";
 }
@@ -758,6 +1316,8 @@ Options parseOptions(int argc, char* argv[]) {
             options.max_dist_bins = parseIntOption(nextValue(argc, argv, i, arg), arg);
         } else if (arg == "--threads") {
             options.threads = parseIntOption(nextValue(argc, argv, i, arg), arg);
+        } else if (arg == "--input-format") {
+            options.input_format = parseInputFormat(nextValue(argc, argv, i, arg));
         } else if (arg == "-k" || arg == "--norm") {
             const std::string norm_arg = nextValue(argc, argv, i, arg);
             if (norm_arg.empty()) {
@@ -800,7 +1360,10 @@ Options parseOptions(int argc, char* argv[]) {
         throw std::runtime_error(oss.str());
     }
 
-    options.hic_file = positional[0];
+    options.input_file = positional[0];
+    if (options.input_format == InputFormat::Auto) {
+        options.input_format = detectInputFormat(options.input_file);
+    }
     for (size_t i = 1; i < positional.size(); i += 2) {
         options.outputs.push_back(OutputSpec{positional[i], positional[i + 1]});
     }
@@ -809,13 +1372,27 @@ Options parseOptions(int argc, char* argv[]) {
 }
 
 int runAPA(const Options& options) {
-    if (options.hic_file.empty()) {
-        throw std::runtime_error("No .hic file provided");
+    if (options.input_file.empty()) {
+        throw std::runtime_error("No contact input file provided");
     }
 
-    validateResolutionAvailable(options);
+    if (options.input_format != InputFormat::Hic && !options.hic_normalization.empty()) {
+        throw std::runtime_error(
+            "Stored normalization " + options.hic_normalization +
+            " can only be used with .hic input; pairs and BAM support aggregate normalization only");
+    }
 
-    const std::vector<chromosome> chromosomes = getChromosomesForFile(options.hic_file);
+    std::vector<chromosome> chromosomes;
+    if (options.input_format == InputFormat::Hic) {
+        validateResolutionAvailable(options);
+        chromosomes = getChromosomesForFile(options.input_file);
+    } else if (options.input_format == InputFormat::Pairs) {
+        chromosomes = getChromosomesForPairs(options.input_file);
+    } else if (options.input_format == InputFormat::Bam) {
+        chromosomes = getChromosomesForBam(options.input_file);
+    } else {
+        throw std::runtime_error("Input format was not resolved");
+    }
     const auto chromosome_map = buildChromosomeMap(chromosomes);
     const int matrix_width = options.window * 2 + 1;
 
@@ -832,48 +1409,52 @@ int runAPA(const Options& options) {
 
     std::vector<OutputBuffers> global_outputs = createThreadLocalState(options.outputs.size(), matrix_width).outputs;
 
-    std::atomic<size_t> next_pair_index{0};
-    std::mutex io_mutex;
-    std::mutex merge_mutex;
-    std::mutex error_mutex;
-    std::exception_ptr first_error;
-    std::atomic<bool> stop_requested{false};
+    if (options.input_format == InputFormat::Hic) {
+        std::atomic<size_t> next_pair_index{0};
+        std::mutex io_mutex;
+        std::mutex merge_mutex;
+        std::mutex error_mutex;
+        std::exception_ptr first_error;
+        std::atomic<bool> stop_requested{false};
 
-    const unsigned int num_threads = getThreadCount(options, pair_work.size());
-    std::vector<std::thread> workers;
-    workers.reserve(num_threads);
+        const unsigned int num_threads = getThreadCount(options, pair_work.size());
+        std::vector<std::thread> workers;
+        workers.reserve(num_threads);
 
-    for (unsigned int thread_index = 0; thread_index < num_threads; ++thread_index) {
-        workers.emplace_back([&]() {
-            ThreadLocalState local_state = createThreadLocalState(options.outputs.size(), matrix_width);
-            try {
-                while (!stop_requested.load(std::memory_order_relaxed)) {
-                    const size_t pair_index = next_pair_index.fetch_add(1, std::memory_order_relaxed);
-                    if (pair_index >= pair_work.size()) {
-                        break;
+        for (unsigned int thread_index = 0; thread_index < num_threads; ++thread_index) {
+            workers.emplace_back([&]() {
+                ThreadLocalState local_state = createThreadLocalState(options.outputs.size(), matrix_width);
+                try {
+                    while (!stop_requested.load(std::memory_order_relaxed)) {
+                        const size_t pair_index = next_pair_index.fetch_add(1, std::memory_order_relaxed);
+                        if (pair_index >= pair_work.size()) {
+                            break;
+                        }
+
+                        processHicPairWork(pair_work[pair_index], options, local_state, io_mutex);
                     }
-
-                    processPairWork(pair_work[pair_index], options, local_state, io_mutex);
+                } catch (...) {
+                    stop_requested.store(true, std::memory_order_relaxed);
+                    std::lock_guard<std::mutex> lock(error_mutex);
+                    if (!first_error) {
+                        first_error = std::current_exception();
+                    }
                 }
-            } catch (...) {
-                stop_requested.store(true, std::memory_order_relaxed);
-                std::lock_guard<std::mutex> lock(error_mutex);
-                if (!first_error) {
-                    first_error = std::current_exception();
-                }
-            }
 
-            std::lock_guard<std::mutex> lock(merge_mutex);
-            mergeOutputBuffers(global_outputs, local_state.outputs);
-        });
-    }
+                std::lock_guard<std::mutex> lock(merge_mutex);
+                mergeOutputBuffers(global_outputs, local_state.outputs);
+            });
+        }
 
-    for (auto& worker : workers) {
-        worker.join();
-    }
+        for (auto& worker : workers) {
+            worker.join();
+        }
 
-    if (first_error) {
-        std::rethrow_exception(first_error);
+        if (first_error) {
+            std::rethrow_exception(first_error);
+        }
+    } else {
+        processStreamInput(pair_work, chromosome_map, options, global_outputs);
     }
 
     for (size_t output_idx = 0; output_idx < global_outputs.size(); ++output_idx) {
