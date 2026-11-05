@@ -3,6 +3,45 @@
 Direct aggregate peak analysis from `.hic`, 4DN/DCIC `.pairs`, or BAM contacts.
 The `.hic` reader uses the sibling `straw` checkout; BAM support uses htslib.
 
+The repository also provides Aggregate Track Analysis (ATA) for BigWig signal
+around BED regions through the standalone `ata_bigwig` C++17 executable.
+
+## Aggregate Track Analysis
+
+Build with an installed libBigWig, libcurl, and zlib:
+
+```bash
+./ata-c-bigwig/build.sh
+```
+
+Alternatively, use a libBigWig source checkout after running `make lib-static`
+in that checkout:
+
+```bash
+LIBBIGWIG_DIR=/path/to/libBigWig ./ata-c-bigwig/build.sh
+```
+
+Run from the repository root:
+
+```bash
+./ata-c-bigwig/ata_bigwig --window 100 --res 10 signal.bw regions.bed output
+```
+
+This writes `output.npy`, a one-dimensional float64 NumPy array with
+`2 * window + 1` bins centered on each BED interval's midpoint. `--window` is
+the number of bins on either side (default 100); `--res` is bases per bin
+(default 1). BED6 minus-strand profiles are reversed before aggregation.
+
+`--mode coverage` (default) averages positive BigWig signal over each bin's
+bases; `--mode java` assigns each positive interval value to its start bin.
+Zero and negative values contribute zero in both modes. Profiles are divided
+by all usable BED regions by default, treating missing signal as zero.
+Use `--normalization overlap` to divide only by regions with BigWig overlaps.
+Chromosome names are retried with the `chr` prefix added or removed.
+
+The ATA source was imported from the haplotype motif analysis project's
+`ata_cpp/ata_bigwig.cpp`. It requires no motif pipeline scripts or data.
+
 ## What it does
 
 - Reads contact data directly from a `.hic`, `.pairs`, `.pairs.gz`, or `.bam` file at a single resolution
