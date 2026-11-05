@@ -2,3 +2,4 @@
 /clear-tools-main
 /test
 run_all_apa_validation.sh
+/ata-c-bigwig/ata_bigwig

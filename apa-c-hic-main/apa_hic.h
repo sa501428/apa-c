@@ -10,6 +10,13 @@ struct OutputSpec {
     std::string output_file;
 };
 
+enum class InputFormat {
+    Auto,
+    Hic,
+    Pairs,
+    Bam,
+};
+
 struct Options {
     bool include_inter = false;
     int resolution = 5000;
@@ -20,7 +27,8 @@ struct Options {
     // Empty means the default, locally calculated aggregate normalization.
     // Otherwise this is a normalization stored in the .hic file (for example KR or SCALE).
     std::string hic_normalization;
-    std::string hic_file;
+    InputFormat input_format = InputFormat::Auto;
+    std::string input_file;
     std::vector<OutputSpec> outputs;
 };
 
